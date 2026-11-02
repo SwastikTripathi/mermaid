@@ -643,6 +643,66 @@ describe('lineJump', () => {
       expect(d.endsWith('L16,5')).toBe(true);
     });
 
+    describe('dashed and dotted edges in the neo look', () => {
+      // generateDashArray in edges.js emits `0 <oValueS> (<dash> <gap>)... <oValueE>`.
+      const rewriteDashArray = (dashArray: string, totalLength: number) => {
+        const edges: EdgeGeom[] = [
+          {
+            id: 'horiz',
+            points: [
+              { x: 0, y: 5 },
+              { x: 20, y: 5 },
+            ],
+            curve: 'linear',
+          },
+          {
+            id: 'vert',
+            points: [
+              { x: 10, y: 0 },
+              { x: 10, y: 20 },
+            ],
+            curve: 'linear',
+          },
+        ];
+        const { group } = makeGroup([
+          { id: 'horiz', d: 'M0,5 L20,5' },
+          { id: 'vert', d: 'M10,0 L10,20' },
+        ]);
+        const horiz = group.node()!.querySelector('path[data-id="horiz"]')!;
+        horiz.setAttribute('style', `stroke-dasharray: ${dashArray}; stroke-dashoffset: 0;`);
+        (horiz as unknown as SVGPathElement).getTotalLength = () => totalLength;
+
+        applyLineJumpsToSvg(group, edges, ARC_CONFIG);
+
+        expect(horiz.getAttribute('d')).toContain('A');
+        return /stroke-dasharray:\s*([^;]*);/.exec(horiz.getAttribute('style')!)?.[1];
+      };
+
+      it('keeps the dash pattern when a dashed edge takes a hop', () => {
+        // (30 - 0 - 6) / 4 = 6 pairs. This used to become the solid `0 0 2 2`.
+        expect(rewriteDashArray('0 0 2 2 2 2 2 2 2 2 6', 30)).toBe('0 0 2 2 2 2 2 2 2 2 2 2 2 2 6');
+      });
+
+      it('keeps the marker offsets of a dashed edge', () => {
+        // (29 - 9 - 4) / 4 = 4 pairs.
+        expect(rewriteDashArray('0 9 2 2 2 2 4', 29)).toBe('0 9 2 2 2 2 2 2 2 2 4');
+      });
+
+      it('keeps a dash length other than the default', () => {
+        // (20 - 0 - 0) / 6 = 3 complete pairs.
+        expect(rewriteDashArray('0 0 4 2 4 2 0', 20)).toBe('0 0 4 2 4 2 4 2 0');
+      });
+
+      it('drops every pair when the path is too short for one', () => {
+        expect(rewriteDashArray('0 9 2 2 2 2 9', 20)).toBe('0 9 9');
+      });
+
+      it('leaves a dash array in another form alone', () => {
+        expect(rewriteDashArray('5 5', 30)).toBe('5 5');
+        expect(rewriteDashArray('0 0 2 3 4 5 6', 30)).toBe('0 0 2 3 4 5 6');
+      });
+    });
+
     it('recomputes stroke-dasharray against the new total length to preserve neo-look marker clearance', () => {
       // The `neo` look in edges.js emits:
       //   stroke-dasharray: 0 <oValueS> <len - oValueS - oValueE> <oValueE>

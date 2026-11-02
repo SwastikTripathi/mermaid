@@ -637,6 +637,49 @@ function decodeDataPoints(raw: string | null): Point[] | null {
 }
 
 /**
+ * Recompute the `neo` look's stroke-dasharray for a path of a new length.
+ *
+ * edges.js emits `0 <oValueS> <middle> <oValueE>`, which hides the first oValueS
+ * and last oValueE pixels of the stroke — this is what actually prevents the
+ * stroke from poking into the arrow marker body. `<middle>` is the visible
+ * length of a solid edge, or repeated `<dash> <gap>` pairs for a dashed or dotted
+ * one. A rewritten path has a different length, so without updating the middle
+ * the hidden tail ends up in the wrong place.
+ *
+ * Returns `null` if the style has no dash array in this form.
+ */
+function recomputeDashArray(style: string, totalLength: number): string | null {
+  const dashArray = /stroke-dasharray\s*:\s*([^;]*)/.exec(style)?.[1].trim();
+  if (!dashArray) {
+    return null;
+  }
+  const values = dashArray.split(/\s+/).map(Number);
+  if (values.length < 4 || values[0] !== 0 || values.some(Number.isNaN)) {
+    return null;
+  }
+
+  const oValueS = values[1];
+  const oValueE = values[values.length - 1];
+  const middle = values.slice(2, -1);
+  const middleLength = Math.max(0, totalLength - oValueS - oValueE);
+
+  if (middle.length === 1) {
+    return `0 ${oValueS} ${middleLength} ${oValueE}`;
+  }
+
+  const [dash, gap] = middle;
+  const isDashPattern =
+    middle.length % 2 === 0 &&
+    dash + gap > 0 &&
+    middle.every((value, index) => value === (index % 2 === 0 ? dash : gap));
+  if (!isDashPattern) {
+    return null;
+  }
+  const pairs = Array<string>(Math.floor(middleLength / (dash + gap))).fill(`${dash} ${gap}`);
+  return [0, oValueS, ...pairs, oValueE].join(' ');
+}
+
+/**
  * Patches the rendered SVG paths in `edgePathsGroup` for any edges that
  * cross. The true geometry is read from each path's `data-points` attribute
  * (written by edges.js at render time) so the rewrite's endpoints match
@@ -725,35 +768,24 @@ export function applyLineJumpsToSvg(
       }
     }
 
-    // Read the ORIGINAL stroke-dasharray before rewriting so we can
-    // recompute it against the new total length. The `neo` look emits:
-    //   stroke-dasharray: 0 <oValueS> <len - oValueS - oValueE> <oValueE>;
-    // which hides the first oValueS and last oValueE pixels of the stroke
-    // — this is what actually prevents the stroke from poking into the arrow
-    // marker body. Our rewritten path has a different length, so without
-    // updating the "on" portion the hidden tail ends up in the wrong place.
+    // Read the ORIGINAL style before rewriting so we can recompute the
+    // stroke-dasharray against the new total length (see recomputeDashArray).
     const originalStyle = pathEl.getAttribute('style') ?? '';
-    const dasharrayMatch = /stroke-dasharray\s*:\s*0\s+([\d.]+)\s+[\d.]+\s+([\d.]+)/.exec(
-      originalStyle
-    );
-    const preservedOValueS = dasharrayMatch ? Number.parseFloat(dasharrayMatch[1]) : null;
-    const preservedOValueE = dasharrayMatch ? Number.parseFloat(dasharrayMatch[2]) : null;
 
     const newD = rewriteEdgePath(renderedEdge, jumps, config);
     pathEl.setAttribute('d', newD);
 
-    if (
-      preservedOValueS !== null &&
-      preservedOValueE !== null &&
-      typeof (pathEl as SVGPathElement).getTotalLength === 'function'
-    ) {
-      const newLen = (pathEl as SVGPathElement).getTotalLength();
-      const onLen = Math.max(0, newLen - preservedOValueS - preservedOValueE);
-      const newDasharray = `0 ${preservedOValueS} ${onLen} ${preservedOValueE}`;
-      const cleaned = originalStyle
-        .replace(/stroke-dasharray\s*:[^;]*;?/g, `stroke-dasharray: ${newDasharray};`)
-        .replace(/;\s*;+/g, ';');
-      pathEl.setAttribute('style', cleaned);
+    if (typeof (pathEl as SVGPathElement).getTotalLength === 'function') {
+      const newDasharray = recomputeDashArray(
+        originalStyle,
+        (pathEl as SVGPathElement).getTotalLength()
+      );
+      if (newDasharray !== null) {
+        const cleaned = originalStyle
+          .replace(/stroke-dasharray\s*:[^;]*;?/g, `stroke-dasharray: ${newDasharray};`)
+          .replace(/;\s*;+/g, ';');
+        pathEl.setAttribute('style', cleaned);
+      }
     }
   }
 }
